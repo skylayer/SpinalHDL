@@ -287,6 +287,7 @@ class ComponentEmitterVerilog(
   def emitInitials() : Unit = {
     var withRandBoot = ArrayBuffer[(BaseType, String)]();
     var withInitBoot = ArrayBuffer[(BaseType, String)]();
+    var withSimInit = ArrayBuffer[(BaseType, String)]();
     component.dslBody.walkDeclarations {
       case bt: BaseType => {
         if (!bt.isSuffix) {
@@ -298,12 +299,16 @@ class ComponentEmitterVerilog(
             case null =>
             case str  => withInitBoot += bt -> str
           }
+          getBaseTypeSignalSimInit(bt) match {
+            case null =>
+            case str  => withSimInit += bt -> str
+          }
         }
       }
       case _ =>
     }
 
-    if(initials.isEmpty && withRandBoot.isEmpty && withInitBoot.isEmpty) return
+    if(initials.isEmpty && withRandBoot.isEmpty && withInitBoot.isEmpty && withSimInit.isEmpty) return
     logics ++= "  initial begin\n"
     emitLeafStatements(initials, 0, c.dslBody, "=", logics , "    ")
 
@@ -314,6 +319,11 @@ class ComponentEmitterVerilog(
         logics ++= s"${theme.maintab + theme.maintab}${name}${str};\n"
       }
       logics ++= "  `endif\n"
+    }
+
+    for((bt, str) <- withSimInit){
+      val name = emitReference(bt, false)
+      logics ++= s"${theme.maintab + theme.maintab}${name}${str};\n"
     }
 
     for((bt, str) <- withInitBoot){
@@ -474,7 +484,7 @@ class ComponentEmitterVerilog(
           }
         }
       }
-      val maxNameLengthConNew = if(prepareInstports.isEmpty) 0 else prepareInstports.map(_._2.length()).max
+      val maxNameLengthConNew = if(prepareInstports.isEmpty) 0 else Math.max(1, prepareInstports.map(_._2.length()).max)
       val prepareInstportsLen = prepareInstports
         .map(x => (x._1, s"%-${maxNameLengthConNew}s".format(x._2), x._3))
         .map(x => s"${x._1}${x._2}${x._3}")
@@ -633,10 +643,10 @@ class ComponentEmitterVerilog(
     }
   }
 
-  def emitEnumDebugLogic(): Unit ={
+  def emitEnumDebugLogic(): Unit = {
     if(enumDebugStringList.nonEmpty) {
       logics ++= "  `ifndef SYNTHESIS\n"
-      for((signal, name, charCount) <- enumDebugStringList){
+      for((signal, name, charCount) <- enumDebugStringList) {
         def normalizeString(that : String) = that + " " * (charCount - that.length)
         logics ++= s"  always @(*) begin\n"
         logics ++= s"    case(${emitReference(signal, false)})\n"
@@ -1155,6 +1165,50 @@ class ComponentEmitterVerilog(
     null
   }
 
+  def getBaseTypeSignalSimInit(signal: BaseType): String = {
+    if(signal.isReg){
+      signal.getTag(classOf[SimInitTag]) match {
+        case Some(tag) =>
+          try {
+            val result = tag.value match {
+              case bvl: BitVectorLiteral =>
+                val targetWidth = signal.getBitsWidth
+                val value = bvl.getValue()
+
+                // Handle negative values
+                val unsignedValue = if (value >= 0) {
+                  value
+                } else {
+                  (BigInt(1) << targetWidth) + value
+                }
+
+                // Use hex for width > 4, binary for width <= 4
+                if (targetWidth > 4) {
+                  val hexDigits = (targetWidth + 3) / 4
+                  val hexValue = unsignedValue.toString(16)
+                  val paddedHex = ("0" * (hexDigits - hexValue.length)) + hexValue
+                  s"${targetWidth}'h${paddedHex}"
+                } else {
+                  val binValue = unsignedValue.toString(2)
+                  val paddedBin = ("0" * (targetWidth - binValue.length)) + binValue
+                  s"${targetWidth}'b${paddedBin}"
+                }
+              case _ =>
+                emitExpressionNoWrappeForFirstOne(tag.value)
+            }
+            " = " + result
+          } catch {
+            case e: Exception =>
+              SpinalError(s"Failed to process SimInit for signal $signal: ${e.getMessage}. " +
+                s"SimInit value must be a compile-time constant. Tag value: ${tag.value}, type: ${tag.value.getClass}")
+          }
+        case None => null
+      }
+    } else {
+      null
+    }
+  }
+
   var memBitsMaskKind: MemBitsMaskKind = MULTIPLE_RAM
   val enumDebugStringList = ArrayBuffer[(SpinalEnumCraft[_ <: SpinalEnum], String, Int)]()
   val localEnums          = mutable.LinkedHashSet[(SpinalEnum, SpinalEnumEncoding)]()
@@ -1311,16 +1365,13 @@ end
     def emitWrite(b: StringBuilder, mem: Mem[_], writeEnable: String, address: Expression, data: Expression, mask: Expression with WidthProvider, symbolCount: Int, bitPerSymbole: Int, tab: String): Unit = {
 
       if(memBitsMaskKind == SINGLE_RAM || symbolCount == 1) {
-        val ramAssign = s"$tab${emitReference(mem, false)}[${emitExpression(address)}] <= ${emitExpression(data)};\n"
-
-        if (writeEnable != null) {
-          b ++= s"${tab}if(${writeEnable}) begin\n  "
-          b ++= ramAssign
-          b ++= s"${tab}end\n"
-        } else {
-          b ++= ramAssign
-        }
-
+        val ramAssign = s"$tab  ${emitReference(mem, false)}[${emitExpression(address)}] <= ${emitExpression(data)};\n"
+        var conds = if(writeEnable != null) List(writeEnable) else Nil
+        if(mask != null)
+          conds =  s"${emitExpression(mask)}[0]" :: conds
+        if(conds.nonEmpty) b ++= s"${tab}if(${conds.mkString(" && ")}) begin\n"
+        b ++= ramAssign
+        if(conds.nonEmpty) b ++= s"${tab}end\n"
       } else {
 
         def maskCount = mask.getWidth
@@ -1650,19 +1701,20 @@ end
     emitEnumLiteral(e.senum, e.encoding)
   }
 
-  def enumEgualsImpl(eguals: Boolean)(e: BinaryOperator with EnumEncoded): String = {
+  def enumEgualsImpl(eguals: Boolean, sim : Boolean)(e: BinaryOperator with EnumEncoded): String = {
     val enumDef  = e.getDefinition
     val encoding = e.getEncoding
 
+    def cmpEqu = if(sim) "===" else "=="
     encoding match {
       case `binaryOneHot` => {
         (e.left, e.right) match {
           case (sig : SpinalEnumCraft[_], lit : EnumLiteral[_]) => s"(${if (eguals) "" else "! "}${emitExpression(sig)}[${emitEnumLiteral(lit.senum, lit.encoding)}_OH_ID])"
           case (lit : EnumLiteral[_], sig : SpinalEnumCraft[_]) => s"(${if (eguals) "" else "! "}${emitExpression(sig)}[${emitEnumLiteral(lit.senum, lit.encoding)}_OH_ID])"
-          case _ => s"((${emitExpression(e.left)} & ${emitExpression(e.right)}) ${if (eguals) "!=" else "=="} ${encoding.getWidth(enumDef)}'b${"0" * encoding.getWidth(enumDef)})"
+          case _ => s"((${emitExpression(e.left)} & ${emitExpression(e.right)}) ${if (eguals) "!=" else cmpEqu} ${encoding.getWidth(enumDef)}'b${"0" * encoding.getWidth(enumDef)})"
         }
       }
-      case _              => s"(${emitExpression(e.left)} ${if (eguals) "==" else "!="} ${emitExpression(e.right)})"
+      case _              => s"(${emitExpression(e.left)} ${if (eguals) cmpEqu else "!="} ${emitExpression(e.right)})"
     }
   }
 
@@ -1718,6 +1770,7 @@ end
     case  e: Operator.UInt.Xor                        => operatorImplAsBinaryOperator("^")(e)
     case  e: Operator.UInt.Not                        =>  operatorImplAsUnaryOperator("~")(e)
 
+    case  e: Operator.UInt.EqualSim                   => operatorImplAsBinaryOperator("===")(e)
     case  e: Operator.UInt.Equal                      => operatorImplAsBinaryOperator("==")(e)
     case  e: Operator.UInt.NotEqual                   => operatorImplAsBinaryOperator("!=")(e)
     case  e: Operator.UInt.Smaller                    => operatorImplAsBinaryOperator("<")(e)
@@ -1744,6 +1797,7 @@ end
     case  e: Operator.SInt.Not                        =>  operatorImplAsUnaryOperator("~")(e)
     case  e: Operator.SInt.Minus                      => operatorImplAsUnaryOperator("-")(e)
 
+    case  e: Operator.SInt.EqualSim                   => operatorImplAsBinaryOperatorSigned("===")(e)
     case  e: Operator.SInt.Equal                      => operatorImplAsBinaryOperatorSigned("==")(e)
     case  e: Operator.SInt.NotEqual                   => operatorImplAsBinaryOperatorSigned("!=")(e)
     case  e: Operator.SInt.Smaller                    =>  operatorImplAsBinaryOperatorSigned("<")(e)
@@ -1763,6 +1817,7 @@ end
     case  e: Operator.Bits.And                        => operatorImplAsBinaryOperator("&")(e)
     case  e: Operator.Bits.Xor                        => operatorImplAsBinaryOperator("^")(e)
     case  e: Operator.Bits.Not                        =>  operatorImplAsUnaryOperator("~")(e)
+    case  e: Operator.Bits.EqualSim                   => operatorImplAsBinaryOperator("===")(e)
     case  e: Operator.Bits.Equal                      => operatorImplAsBinaryOperator("==")(e)
     case  e: Operator.Bits.NotEqual                   => operatorImplAsBinaryOperator("!=")(e)
 
@@ -1775,6 +1830,7 @@ end
     case  e: Operator.Bits.ShiftLeftByUIntFixedWidth  => operatorImplAsBinaryOperator("<<<")(e)
 
     //bool
+    case  e: Operator.Bool.EqualSim                      => operatorImplAsBinaryOperator("===")(e)
     case  e: Operator.Bool.Equal                      => operatorImplAsBinaryOperator("==")(e)
     case  e: Operator.Bool.NotEqual                   => operatorImplAsBinaryOperator("!=")(e)
 
@@ -1784,8 +1840,9 @@ end
     case  e: Operator.Bool.Xor                        => operatorImplAsBinaryOperator("^")(e)
 
     //senum
-    case  e: Operator.Enum.Equal                      => enumEgualsImpl(true)(e)
-    case  e: Operator.Enum.NotEqual                   => enumEgualsImpl(false)(e)
+    case  e: Operator.Enum.EqualSim                   => enumEgualsImpl(true, true)(e)
+    case  e: Operator.Enum.Equal                      => enumEgualsImpl(true, false)(e)
+    case  e: Operator.Enum.NotEqual                   => enumEgualsImpl(false, false)(e)
 
     //cast
     case  e: CastSIntToBits                           => operatorImplAsNoTransformation(e)
@@ -1926,6 +1983,11 @@ end
     outputWrap contains sig
   }
 
+  for(child <- component.children){
+    for(io <- child.getAllIo if io.isInput && io.dlcIsEmpty) {
+      openSubIo += io
+    }
+  }
   elaborate()
   fillExpressionToWrap()
   emitEntity()

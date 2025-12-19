@@ -13,6 +13,8 @@ object FloatingAbs {
     */
   def apply(that: Floating): Floating = {
     val x = cloneOf(that)
+    x.mantissa := that.mantissa
+    x.exponent := that.exponent
     x.sign := False
     x
   }
@@ -24,6 +26,8 @@ object FloatingAbs {
     */
   def apply(that: RecFloating): RecFloating = {
     val x = cloneOf(that)
+    x.mantissa := that.mantissa
+    x.exponent := that.exponent
     x.sign := False
     x
   }
@@ -43,7 +47,7 @@ object FloatingToSInt {
     */
   def apply(input: RecFloating, width: Int, offset: Int): SInt = {
     val isNotZero = input.exponent(input.exponentSize - 1 downto input.exponentSize - 3).orR
-    val extendedMantissa = Bits(32 bits)
+    val extendedMantissa = Bits(width bits)
     extendedMantissa := (isNotZero ## input.mantissa).resizeLeft(width)
     val exponentOffset = input.exponent.asUInt - U(input.getExponentZero + input.getExponentBias)
     val shift = width - 1 - exponentOffset - offset

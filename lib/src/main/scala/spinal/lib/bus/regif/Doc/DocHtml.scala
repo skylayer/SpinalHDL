@@ -58,8 +58,40 @@ object SlicesToHtmlSliceBlock {
     val realBlocks = slices.filter(_.reuseTag.id != 0).groupBy(t => (t.reuseTag.instName , t.reuseTag.blockName)).map{ case (names, slices) =>
       HtmlRegSliceBlock(names._1, names._2, slices)
     }.toList
-    val ret = if(fakeBlocks.isEmpty) realBlocks else fakeBlocks :: realBlocks
+
+    val fakeBlocksSplitByAddr = splitFakeBlocksByAddr(fakeBlocks.children, realBlocks)
+    val ret = if(fakeBlocks.isEmpty) realBlocks else fakeBlocksSplitByAddr ++ realBlocks
     ret.sortBy(_.children.head.addr)
+  }
+
+  private def splitFakeBlocksByAddr(A: List[RegSlice], B: List[HtmlRegSliceBlock]): List[HtmlRegSliceBlock] = {
+    val sortedB = B.sortBy(_.children.head.addr)
+    val sortedA = A.sortBy(_.addr)
+
+    val splitAddrs = sortedB.map(_.children.head.addr).sorted
+
+    @scala.annotation.tailrec
+    def process(remaining: List[RegSlice], splitPoints: List[BigInt], acc: List[HtmlRegSliceBlock]): List[HtmlRegSliceBlock] = {
+      remaining match {
+        case Nil => acc.reverse
+        case _ =>
+          splitPoints match {
+            case Nil =>
+              (HtmlRegSliceBlock("", "", remaining) :: acc).reverse
+            case splitAddr :: restSplit =>
+              val (beforeSplit, afterSplit) = remaining.span(_.addr < splitAddr)
+
+              if (beforeSplit.nonEmpty) {
+                val newBlock = HtmlRegSliceBlock("", "", beforeSplit)
+                process(afterSplit, splitPoints, newBlock :: acc)
+              } else {
+                process(remaining, restSplit, acc)
+              }
+          }
+      }
+    }
+
+    process(sortedA, splitAddrs, List.empty)
   }
 }
 
@@ -97,7 +129,7 @@ object TableTreeNodeImplicits{
   }
 
   implicit class RegSliceExtend(reg: RegSlice) extends TableTreeNode {
-    override val name: String = reg.name
+    override val name: String = reg.getName
     override val children: List[TableTreeNode] = reg.getFields.reverse.map(new FieldExtend(_))
     val regType= reg.regType.toLowerCase
     override def tr_begin = s"""<tr align="left" class="${regType}">""".stripMargin

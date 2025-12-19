@@ -55,6 +55,20 @@ abstract class MultiData extends Data {
     ret
   }
 
+  /** Concatenate the bits of the elements in reverse order.
+    *
+    * This does not recurse, so elements which are composite will appear in forward order.
+    */
+  def asReversedBits: Bits = {
+    var ret: Bits = null
+    for ((_, e) <- elements) {
+      if (ret == null.asInstanceOf[Object]) ret = e.asBits
+      else ret = ret ## e.asBits
+    }
+    if (ret.asInstanceOf[Object] == null) ret = Bits(0 bits)
+    ret
+  }
+
   override def getBitsWidth: Int = {
     var accumulateWidth = 0
     for ((_, e) <- elements) {
@@ -184,6 +198,17 @@ abstract class MultiData extends Data {
       case _               => SpinalError(s"Function isNotEquals is not implemented between $this and $that")
     }
   }
+
+  private[core] def isEqualToSim(that: Any): Bool = {
+    that match {
+      case that: MultiData => {
+        val checks = zippedMap(that, _ isEqualToSim _)
+        if(checks.nonEmpty) checks.reduce(_ && _) else True
+      }
+      case _               => SpinalError(s"Function isEquals is not implemented between $this and $that")
+    }
+  }
+
 
   private[core] override def autoConnect(that: Data)(implicit loc: Location): Unit = {
     that match {
