@@ -245,7 +245,7 @@ class VCSBackend(config: VCSBackendConfig) extends VpiBackend(config) {
 
     config.rtlSourcesPaths
       .filter { s =>
-        s.endsWith(".bin") || s.endsWith(".mem")
+        s.endsWith(".bin") || s.endsWith(".mem") || s.endsWith(".hex")
       }
       .foreach { path =>
         FileUtils.copyFileToDirectory(new File(path), new File(workspacePath))
@@ -353,7 +353,7 @@ class VCSBackend(config: VCSBackendConfig) extends VpiBackend(config) {
     override def buffer[T](f: => T) = f
   }
 
-  def runSimulation(sharedMemIface: SharedMemIface): Thread = {
+  def runSimulation(sharedMemIface: SharedMemIface, testName: String): Thread = {
     val thread = new Thread(new Runnable {
       val iface = sharedMemIface
       val logger = new LoggerPrintWithTerminationFilter()
